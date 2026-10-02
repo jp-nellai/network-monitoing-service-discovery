@@ -1,99 +1,14 @@
 #include "snmp_client.hpp"
+#include "vendor.hpp"
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
 #include <cstdlib>
-#include <string>
-
-namespace {
-std::string variableToString(netsnmp_variable_list* variable) {
-    if (!variable) return {};
-    char buffer[2048]{};
-    snprint_value(buffer, sizeof(buffer), variable->name, variable->name_length, variable);
-    return std::string(buffer);
+#include <cstring>
+#include <vector>
+namespace { std::string val(netsnmp_variable_list*v){if(!v)return{};char b[4096]{};snprint_value(b,sizeof(b),v->name,v->name_length,v);return b;}
+std::string scalar(netsnmp_session*s,const char*text){oid o[MAX_OID_LEN];size_t n=MAX_OID_LEN;if(!read_objid(text,o,&n))return{};auto*p=snmp_pdu_create(SNMP_MSG_GET);snmp_add_null_var(p,o,n);netsnmp_pdu*r=nullptr;int st=snmp_synch_response(s,p,&r);std::string x;if(st==STAT_SUCCESS&&r&&r->errstat==SNMP_ERR_NOERROR&&r->variables)x=val(r->variables);if(r)snmp_free_pdu(r);return x;}
+std::vector<netsnmp_variable_list*> walk(netsnmp_session*s,const char*root){oid base[MAX_OID_LEN];size_t bl=MAX_OID_LEN;if(!read_objid(root,base,&bl))return{};std::vector<netsnmp_variable_list*>out;oid cur[MAX_OID_LEN];size_t cl=bl;memcpy(cur,base,bl*sizeof(oid));for(;;){auto*p=snmp_pdu_create(SNMP_MSG_GETBULK);p->non_repeaters=0;p->max_repetitions=40;snmp_add_null_var(p,cur,cl);netsnmp_pdu*r=nullptr;if(snmp_synch_response(s,p,&r)!=STAT_SUCCESS||!r)break;bool stop=false;for(auto*v=r->variables;v;v=v->next_variable){if(v->type==SNMP_ENDOFMIBVIEW||v->type==SNMP_NOSUCHOBJECT||v->type==SNMP_NOSUCHINSTANCE){stop=true;break;}if(v->name_length<bl||memcmp(v->name,base,bl*sizeof(oid))!=0){stop=true;break;}auto*q=(netsnmp_variable_list*)calloc(1,sizeof(*q));snmp_clone_varbind(v,q);out.push_back(q);memcpy(cur,v->name,v->name_length*sizeof(oid));cl=v->name_length;}snmp_free_pdu(r);if(stop)break;}return out;}
+void freeWalk(std::vector<netsnmp_variable_list*>&v){for(auto*x:v)snmp_free_varbind(x);}
 }
-
-std::string getScalar(netsnmp_session* session, const char* oidText) {
-    oid objectId[MAX_OID_LEN];
-    size_t objectIdLength = MAX_OID_LEN;
-    if (!read_objid(oidText, objectId, &objectIdLength)) return {};
-
-    netsnmp_pdu* pdu = snmp_pdu_create(SNMP_MSG_GET);
-    snmp_add_null_var(pdu, objectId, objectIdLength);
-
-    netsnmp_pdu* response = nullptr;
-    const int status = snmp_synch_response(session, pdu, &response);
-
-    std::string result;
-    if (status == STAT_SUCCESS && response &&
-        response->errstat == SNMP_ERR_NOERROR && response->variables) {
-        result = variableToString(response->variables);
-    }
-    if (response) snmp_free_pdu(response);
-    return result;
-}
-}
-
-SnmpClient::SnmpClient(const std::string& community, int timeoutMs, int retries)
-    : community_(community), timeoutMs_(timeoutMs), retries_(retries) {
-    init_snmp("nms-discovery");
-}
-
-SnmpClient::~SnmpClient() = default;
-
-Device SnmpClient::discover(const std::string& ip) {
-    Device device;
-    device.ip = ip;
-
-    netsnmp_session session{};
-    snmp_sess_init(&session);
-    session.version = SNMP_VERSION_2c;
-    session.peername = strdup(ip.c_str());
-    session.community = reinterpret_cast<u_char*>(const_cast<char*>(community_.c_str()));
-    session.community_len = community_.size();
-    session.timeout = static_cast<long>(timeoutMs_) * 1000L;
-    session.retries = retries_;
-
-    netsnmp_session* opened = snmp_open(&session);
-    if (!opened) {
-        device.error = "Unable to open SNMP session";
-        if (session.peername) free(session.peername);
-        return device;
-    }
-
-    device.sysDescr = getScalar(opened, "1.3.6.1.2.1.1.1.0");
-    device.sysObjectId = getScalar(opened, "1.3.6.1.2.1.1.2.0");
-    device.sysUpTime = getScalar(opened, "1.3.6.1.2.1.1.3.0");
-    device.sysName = getScalar(opened, "1.3.6.1.2.1.1.5.0");
-
-    device.reachable = !device.sysName.empty() ||
-                       !device.sysDescr.empty() ||
-                       !device.sysObjectId.empty();
-
-    if (!device.reachable) {
-        device.error = "No valid SNMP response";
-        snmp_close(opened);
-        if (session.peername) free(session.peername);
-        return device;
-    }
-
-    const std::string desc = device.sysDescr;
-    if (desc.find("router") != std::string::npos ||
-        desc.find("routing") != std::string::npos)
-        device.deviceType = "router";
-    else if (desc.find("switch") != std::string::npos)
-        device.deviceType = "switch";
-    else if (desc.find("printer") != std::string::npos)
-        device.deviceType = "printer";
-    else if (desc.find("Linux") != std::string::npos ||
-             desc.find("linux") != std::string::npos)
-        device.deviceType = "linux-host";
-    else if (desc.find("Windows") != std::string::npos ||
-             desc.find("windows") != std::string::npos)
-        device.deviceType = "windows-host";
-    else
-        device.deviceType = "unknown";
-
-    snmp_close(opened);
-    if (session.peername) free(session.peername);
-    return device;
-}
+SnmpClient::SnmpClient(SnmpCredentials c,int t,int r):c_(std::move(c)),timeout_(t),retries_(r){init_snmp("nms-discovery-v2");}
+Device SnmpClient::discover(const std::string&ip){Device d;d.ip=ip;netsnmp_session ss{};snmp_sess_init(&ss);ss.version=SNMP_VERSION_3;ss.peername=strdup(ip.c_str());ss.timeout=(long)timeout_*1000;ss.retries=retries_;ss.securityName=strdup(c_.securityName.c_str());ss.securityNameLen=c_.securityName.size();ss.securityLevel=c_.securityLevel;if(c_.securityLevel>=2){ss.securityAuthProto=usmHMACSHA1AuthProtocol;ss.securityAuthProtoLen=USM_AUTH_PROTO_SHA_LEN;ss.securityAuthKeyLen=USM_AUTH_KU_LEN;if(generate_Ku(ss.securityAuthProto,ss.securityAuthProtoLen,(u_char*)c_.authPass.data(),c_.authPass.size(),ss.securityAuthKey,&ss.securityAuthKeyLen)!=SNMPERR_SUCCESS)d.error="auth key generation failed";}if(c_.securityLevel>=3){ss.securityPrivProto=usmAESPrivProtocol;ss.securityPrivProtoLen=USM_PRIV_PROTO_AES_LEN;ss.securityPrivKeyLen=USM_PRIV_KU_LEN;if(generate_Ku(ss.securityAuthProto,ss.securityAuthProtoLen,(u_char*)c_.privPass.data(),c_.privPass.size(),ss.securityPrivKey,&ss.securityPrivKeyLen)!=SNMPERR_SUCCESS)d.error="privacy key generation failed";}auto*s=snmp_open(&ss);if(!s){d.error="SNMPv3 session open failed";if(ss.peername)free(ss.peername);if(ss.securityName)free(ss.securityName);return d;}d.sysDescr=scalar(s,"1.3.6.1.2.1.1.1.0");d.sysObjectId=scalar(s,"1.3.6.1.2.1.1.2.0");d.sysUpTime=scalar(s,"1.3.6.1.2.1.1.3.0");d.sysName=scalar(s,"1.3.6.1.2.1.1.5.0");d.reachable=!d.sysName.empty()||!d.sysDescr.empty();d.vendor=detectVendor(d.sysObjectId,d.sysDescr);d.deviceType=detectDeviceType(d.sysDescr);auto rows=walk(s,"1.3.6.1.2.1.2.2.1.1");for(auto*v:rows){InterfaceInfo x;x.index=v->val.integer?*v->val.integer:0;d.interfaces.push_back(x);}freeWalk(rows);for(auto&x:d.interfaces){std::string q="."+std::to_string(x.index);x.description=scalar(s,("1.3.6.1.2.1.2.2.1.2"+q).c_str());x.type=scalar(s,("1.3.6.1.2.1.2.2.1.3"+q).c_str());x.speed=scalar(s,("1.3.6.1.2.1.2.2.1.5"+q).c_str());x.adminStatus=scalar(s,("1.3.6.1.2.1.2.2.1.7"+q).c_str());x.operStatus=scalar(s,("1.3.6.1.2.1.2.2.1.8"+q).c_str());x.name=scalar(s,("1.3.6.1.2.1.31.1.1.1.1"+q).c_str());if(x.name.empty())x.name=x.description;}snmp_close(s);if(ss.peername)free(ss.peername);if(ss.securityName)free(ss.securityName);return d;}

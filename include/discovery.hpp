@@ -1,15 +1,6 @@
 #pragma once
-#include "device.hpp"
+#include "model.hpp"
+#include "snmp_client.hpp"
 #include <string>
 #include <vector>
-
-class DiscoveryEngine {
-public:
-    DiscoveryEngine(std::string community, int timeoutMs, int retries, int workerCount);
-    std::vector<Device> discover(const std::vector<std::string>& addresses);
-private:
-    std::string community_;
-    int timeoutMs_;
-    int retries_;
-    int workerCount_;
-};
+class DiscoveryEngine { SnmpCredentials c_; int timeout_,retries_,workers_; public: DiscoveryEngine(SnmpCredentials,int,int,int); std::vector<Device> run(const std::vector<std::string>&); };

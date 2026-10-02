@@ -1,16 +1,5 @@
 #pragma once
-#include "device.hpp"
+#include "model.hpp"
 #include <string>
-
-class SnmpClient {
-public:
-    SnmpClient(const std::string& community, int timeoutMs, int retries);
-    ~SnmpClient();
-    SnmpClient(const SnmpClient&) = delete;
-    SnmpClient& operator=(const SnmpClient&) = delete;
-    Device discover(const std::string& ip);
-private:
-    std::string community_;
-    int timeoutMs_;
-    int retries_;
-};
+struct SnmpCredentials { std::string securityName,authPass,privPass; int securityLevel{3}; };
+class SnmpClient { public: SnmpClient(SnmpCredentials,int,int); Device discover(const std::string&); private: SnmpCredentials c_; int timeout_,retries_; };
